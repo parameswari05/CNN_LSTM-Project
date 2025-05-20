@@ -1,0 +1,88 @@
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import seaborn as sns
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import (Embedding, Conv1D, LSTM, Dense, Dropout,
+                                     Bidirectional, LayerNormalization, Input, Attention, Concatenate)
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.optimizers import Adam
+from google.colab import files
+from tensorflow.keras.mixed_precision import set_global_policy
+from sklearn.metrics import confusion_matrix
+
+# Enable mixed precision
+set_global_policy('mixed_float16')
+
+# Load text file
+uploaded = files.upload()
+file_name = list(uploaded.keys())[0]
+text = open(file_name, 'r', encoding='utf-8').read().lower()
+
+# Tokenization
+max_vocab_size = 20000
+sequence_length = 8  # Increased sequence length for better context
+tokenizer = Tokenizer(num_words=max_vocab_size, oov_token="<OOV>")
+tokenizer.fit_on_texts([text])
+total_words = min(max_vocab_size, len(tokenizer.word_index) + 1)
+
+# Create input sequences
+words = text.split()
+sequences = []
+for i in range(sequence_length, len(words)):
+    sequence = tokenizer.texts_to_sequences([' '.join(words[i-sequence_length:i+1])])[0]
+    if len(sequence) == sequence_length + 1:
+        sequences.append(sequence)
+sequences = sequences[:300000]
+
+# Padding sequences
+sequences = pad_sequences(sequences, maxlen=sequence_length + 1, padding='pre')
+X, y = sequences[:, :-1], tf.keras.utils.to_categorical(sequences[:, -1], num_classes=total_words)
+
+# Optimizer with Adaptive Learning Rate
+optimizer = Adam(learning_rate=0.002)
+
+# Model Architecture
+input_layer = Input(shape=(sequence_length,))
+embedding = Embedding(total_words, 128, input_length=sequence_length)(input_layer)
+
+# Multi-Filter CNN
+conv3 = Conv1D(256, 3, activation='relu', padding='same')(embedding)
+conv5 = Conv1D(256, 5, activation='relu', padding='same')(embedding)
+conv7 = Conv1D(256, 7, activation='relu', padding='same')(embedding)
+merged = Concatenate()([conv3, conv5, conv7])
+norm = LayerNormalization()(merged)
+
+# BiLSTM + Attention
+bilstm = Bidirectional(LSTM(256, return_sequences=True))(norm)
+attention = Attention()([bilstm, bilstm])
+lstm_out = Bidirectional(LSTM(128))(attention)
+dropout = Dropout(0.4)(lstm_out)
+
+# Dense Layers
+dense1 = Dense(256, activation='relu')(dropout)
+output_layer = Dense(total_words, activation='softmax', dtype='float32')(dense1)
+
+# Compile Model
+model = Model(inputs=input_layer, outputs=output_layer)
+model.compile(loss='categorical_crossentropy', optimizer=optimizer, metrics=['accuracy'])
+
+# Train Model
+model.fit(X, y, epochs=60, batch_size=1024, verbose=1, callbacks=[
+    ModelCheckpoint("best_model.keras", monitor="accuracy", save_best_only=True, mode="max"),
+    EarlyStopping(monitor="accuracy", patience=5, restore_best_weights=True),
+    ReduceLROnPlateau(monitor='accuracy', factor=0.5, patience=3)
+])
+
+# Predict next word
+def predict_next_word(seed_text):
+    sequence = tokenizer.texts_to_sequences([seed_text])[0]
+    sequence = pad_sequences([sequence], maxlen=sequence_length, padding='pre')
+    prediction = np.argmax(model.predict(sequence), axis=-1)
+    return next((word for word, index in tokenizer.word_index.items() if index == prediction), "")
+
+# Example usage
+print(predict_next_word("to sherlock holmes she"))
+
